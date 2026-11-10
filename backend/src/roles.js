@@ -26,13 +26,23 @@ export function roleRouter(emit) {
   // ───────── Client: own case and the services around it
   r.get('/cases/current', client, async (req, res) => {
     const { rows: [inc] } = await pool.query(
-      `SELECT i.id, i.status, i.severity, i.plate, i.ob_number, i.created_at, u.callsign
+      `SELECT i.id, i.status, i.severity, i.plate, i.ob_number, i.created_at, u.callsign,
+              ST_Y(i.location::geometry) AS lat, ST_X(i.location::geometry) AS lng,
+              ST_Y(u.location::geometry) AS unit_lat, ST_X(u.location::geometry) AS unit_lng,
+              ST_Distance(u.location, i.location) AS unit_distance_m
          FROM incidents i LEFT JOIN units u ON u.id = i.assigned_unit_id
         WHERE i.reporter_id = $1 ORDER BY i.created_at DESC LIMIT 1`, [req.user.sub]);
     if (!inc) return res.json(null);
     const one = async (sql) => (await pool.query(sql, [inc.id])).rows[0] || null;
+    // Rough arrival estimate: straight-line distance x 1.4 for road bends, at 30 km/h city speed.
+    const moving = ['dispatched', 'en_route'].includes(inc.status) && inc.unit_distance_m != null;
+    const km = moving ? Number(inc.unit_distance_m) / 1000 : null;
+    delete inc.unit_distance_m;
+    if (!moving) { inc.unit_lat = null; inc.unit_lng = null; }
     res.json({
       ...inc,
+      distance_km: km == null ? null : Math.round(km * 10) / 10,
+      eta_minutes: km == null ? null : Math.max(1, Math.round((km * 1.4 / 30) * 60)),
       claim: await one(`SELECT c.id, c.status, p.name AS insurer FROM claims c JOIN providers p ON p.id=c.provider_id WHERE c.incident_id=$1 ORDER BY c.id DESC LIMIT 1`),
       lead: await one(`SELECT status FROM legal_leads WHERE incident_id=$1 ORDER BY id DESC LIMIT 1`),
       tow: await one(`SELECT status, eta_minutes FROM tow_requests WHERE incident_id=$1 ORDER BY id DESC LIMIT 1`),
@@ -94,6 +104,16 @@ export function roleRouter(emit) {
     on_scene: 'Crew arrived at the scene',
     resolved: 'Patient handed over. Medical response complete',
   };
+
+  // The crew app sends its GPS position here every few seconds while a job is active.
+  r.post('/crew/location', crew, async (req, res) => {
+    const lat = Number(req.body?.lat), lng = Number(req.body?.lng);
+    if (!(lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180)) return res.status(400).json({ error: 'Valid lat/lng required' });
+    const me = await profile(req.user.sub);
+    if (!me?.unit_id) return res.status(400).json({ error: 'This account is not linked to an ambulance' });
+    await pool.query('UPDATE units SET location=ST_MakePoint($2,$1)::geography, updated_at=now() WHERE id=$3', [lat, lng, me.unit_id]);
+    res.json({ ok: true });
+  });
 
   r.get('/crew/jobs', crew, async (req, res) => {
     const me = await profile(req.user.sub);
