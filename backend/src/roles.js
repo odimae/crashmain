@@ -4,6 +4,7 @@ import { pool, tx } from './db.js';
 import { requireAuth } from './auth.js';
 
 const STAFF = ['dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic'];
+const ADMIN_ROLES = [...STAFF, 'admin']; // an admin may create other admins
 const num = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
 const plateOf = (v) => String(v ?? '').toUpperCase().replace(/[^A-Z0-9 ]/g, '').trim().slice(0, 12);
 const note = (c, incidentId, actor, text) =>
@@ -244,7 +245,7 @@ export function roleRouter(emit) {
     const { name, email, password, role, phone, unit_callsign, provider_id } = req.body || {};
     if (!name || !email || !password || String(password).length < 10)
       return res.status(400).json({ error: 'Name, email and a password of 10+ characters are required' });
-    if (!STAFF.includes(role)) return res.status(400).json({ error: `Role must be one of: ${STAFF.join(', ')}` });
+    if (!ADMIN_ROLES.includes(role)) return res.status(400).json({ error: `Role must be one of: ${ADMIN_ROLES.join(', ')}` });
     let unitId = null;
     if (unit_callsign) {
       const { rows: [u] } = await pool.query('SELECT id FROM units WHERE callsign=$1', [String(unit_callsign)]);
@@ -260,6 +261,36 @@ export function roleRouter(emit) {
       if (e.code === '23505') return res.status(409).json({ error: 'Email already registered' });
       throw e;
     }
+  });
+
+  // List all staff accounts (everyone except clients).
+  r.get('/admin/users', requireAuth('admin'), async (_req, res) => {
+    const { rows } = await pool.query(
+      `SELECT u.id, u.name, u.email, u.phone, u.role, u.created_at, un.callsign, pv.name AS provider
+       FROM users u LEFT JOIN units un ON un.id=u.unit_id LEFT JOIN providers pv ON pv.id=u.provider_id
+       WHERE u.role <> 'victim' ORDER BY u.role, u.name`);
+    res.json(rows);
+  });
+
+  r.patch('/admin/users/:id/password', requireAuth('admin'), async (req, res) => {
+    const pw = String(req.body?.password || '');
+    if (pw.length < 10) return res.status(400).json({ error: 'Password must be 10+ characters' });
+    const { rowCount } = await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2 AND role <> \'victim\'', [await bcrypt.hash(pw, 12), Number(req.params.id)]);
+    if (!rowCount) return res.status(404).json({ error: 'User not found' });
+    res.json({ ok: true });
+  });
+
+  r.delete('/admin/users/:id', requireAuth('admin'), async (req, res) => {
+    const id = Number(req.params.id);
+    if (id === Number(req.user.sub)) return res.status(400).json({ error: 'You cannot delete your own account' });
+    const { rows: [t] } = await pool.query('SELECT role FROM users WHERE id=$1', [id]);
+    if (!t || t.role === 'victim') return res.status(404).json({ error: 'User not found' });
+    if (t.role === 'admin') {
+      const { rows: [c] } = await pool.query("SELECT count(*)::int AS n FROM users WHERE role='admin'");
+      if (c.n <= 1) return res.status(400).json({ error: 'Cannot delete the last admin' });
+    }
+    try { await pool.query('DELETE FROM users WHERE id=$1', [id]); res.json({ ok: true }); }
+    catch (e) { if (e.code === '23503') return res.status(409).json({ error: 'This user has case history and cannot be deleted' }); throw e; }
   });
 
   return r;

@@ -94,6 +94,67 @@ function Providers() {
   )
 }
 
+function Users() {
+  const { data, error, reload } = useLoad('/admin/users', false)
+  const { data: providers } = useLoad('/providers', false)
+  const blank = { name: '', email: '', phone: '', role: 'dispatcher', password: '', unit_callsign: '', provider_id: '' }
+  const [f, setF] = useState(blank)
+  const [msg, setMsg] = useState(null)
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value })
+  const orgs = (providers || []).filter((p) => p.type === f.role)
+  const create = async () => {
+    setMsg(null)
+    try {
+      const body = { ...f }
+      if (!body.unit_callsign) delete body.unit_callsign
+      if (!body.provider_id) delete body.provider_id
+      const u = await api('POST', '/admin/users', body)
+      setMsg({ text: `Created ${u.role} account for ${u.email}` })
+      setF({ ...blank, role: f.role }); reload()
+    } catch (e) { setMsg({ text: e.message, err: true }) }
+  }
+  const reset = async (u) => {
+    const pw = window.prompt(`New password for ${u.email} (10+ characters)`)
+    if (!pw) return
+    try { await api('PATCH', `/admin/users/${u.id}/password`, { password: pw }); window.alert('Password changed') } catch (e) { window.alert(e.message) }
+  }
+  const del = async (u) => {
+    if (!window.confirm(`Delete ${u.email}?`)) return
+    try { await api('DELETE', `/admin/users/${u.id}`); reload() } catch (e) { window.alert(e.message) }
+  }
+  return (
+    <>
+      <h2>Staff accounts</h2>
+      {error && !data ? <p className="msg err">{error}</p> : null}
+      {data && (
+        <Table head={['Name', 'Email', 'Role', 'Ambulance / organisation', 'Actions']} empty="No staff accounts.">
+          {data.map((u) => (
+            <tr key={u.id}><td>{u.name}</td><td>{u.email}</td><td>{u.role}</td><td>{u.callsign || u.provider || ''}</td>
+              <td><div className="acts"><button className="small" onClick={() => reset(u)}>Reset password</button>
+                <button className="small ghost" style={{ color: 'var(--red)', borderColor: 'var(--line)' }} onClick={() => del(u)}>Delete</button></div></td></tr>
+          ))}
+        </Table>
+      )}
+      <h2 style={{ marginTop: 24 }}>Create an account</h2>
+      <div className="row">
+        <div><label htmlFor="un">Full name</label><input id="un" value={f.name} onChange={set('name')} /></div>
+        <div><label htmlFor="ue">Email</label><input id="ue" type="email" value={f.email} onChange={set('email')} /></div>
+        <div><label htmlFor="ur">Role</label>
+          <select id="ur" value={f.role} onChange={(e) => setF({ ...f, role: e.target.value, provider_id: '', unit_callsign: '' })}>
+            {['admin', 'dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic'].map((r) => <option key={r}>{r}</option>)}
+          </select></div>
+        <div><label htmlFor="up">Password (10+ characters)</label><input id="up" type="password" autoComplete="new-password" value={f.password} onChange={set('password')} /></div>
+        <div><label htmlFor="uph">Phone (optional)</label><input id="uph" value={f.phone} onChange={set('phone')} /></div>
+        {f.role === 'ambulance' && <div><label htmlFor="uc">Ambulance callsign (e.g. AAR-01)</label><input id="uc" value={f.unit_callsign} onChange={set('unit_callsign')} /></div>}
+        {orgs.length > 0 && <div><label htmlFor="uo">Organisation</label>
+          <select id="uo" value={f.provider_id} onChange={set('provider_id')}><option value="">None</option>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>}
+      </div>
+      <p><button onClick={create}>Create account</button></p>
+      {msg && <p className={`msg${msg.err ? ' err' : ''}`}>{msg.text}</p>}
+    </>
+  )
+}
+
 function Login({ onDone }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -135,7 +196,7 @@ export default function App() {
 
   const signOut = async () => { try { await api('POST', '/auth/logout') } catch {} session.clear(); setAuthed(false) }
   const label = { ok: 'API and database connected', db: 'API up, database not reachable', down: 'API not reachable' }[health] || 'checking API'
-  const tabs = { incidents: 'Incidents', units: 'Ambulances', providers: 'Providers' }
+  const tabs = { incidents: 'Incidents', units: 'Ambulances', providers: 'Providers', users: 'Users' }
 
   return (
     <>
@@ -156,6 +217,7 @@ export default function App() {
               {tab === 'incidents' && <Incidents live={live} />}
               {tab === 'units' && <Units live={live} />}
               {tab === 'providers' && <Providers />}
+              {tab === 'users' && <Users />}
             </div>
           </>
         )}
