@@ -141,7 +141,7 @@ function Users() {
         <div><label htmlFor="ue">Email</label><input id="ue" type="email" value={f.email} onChange={set('email')} /></div>
         <div><label htmlFor="ur">Role</label>
           <select id="ur" value={f.role} onChange={(e) => setF({ ...f, role: e.target.value, provider_id: '', unit_callsign: '' })}>
-            {['admin', 'dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic'].map((r) => <option key={r}>{r}</option>)}
+            {['admin', 'dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic', 'hospital'].map((r) => <option key={r}>{r}</option>)}
           </select></div>
         <div><label htmlFor="up">Password (10+ characters)</label><input id="up" type="password" autoComplete="new-password" value={f.password} onChange={set('password')} /></div>
         <div><label htmlFor="uph">Phone (optional)</label><input id="uph" value={f.phone} onChange={set('phone')} /></div>

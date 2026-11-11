@@ -3,6 +3,7 @@ import cors from 'cors'
 import { pool } from './db.js'
 import { authRouter } from './auth.js'
 import { apiRouter } from './api.js'
+import { sosRouter } from './sos.js'
 
 const app = express()
 app.set('trust proxy', 1)
@@ -21,6 +22,7 @@ app.get('/api/health', async (_req, res) => {
 
 app.use('/api/auth', authRouter)
 // Live push (Socket.io) is not possible on Vercel. The apps poll instead, so emit() does nothing here.
+app.use('/api', sosRouter()) // before apiRouter: guest SOS needs no login
 app.use('/api', apiRouter(() => {}))
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }))

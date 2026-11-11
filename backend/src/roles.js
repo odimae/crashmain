@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import { pool, tx } from './db.js';
 import { requireAuth } from './auth.js';
 
-const STAFF = ['dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic'];
+const STAFF = ['dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic', 'hospital'];
 const ADMIN_ROLES = [...STAFF, 'admin']; // an admin may create other admins
 const num = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
 const plateOf = (v) => String(v ?? '').toUpperCase().replace(/[^A-Z0-9 ]/g, '').trim().slice(0, 12);
@@ -37,10 +37,12 @@ export function roleRouter(emit) {
     // Rough arrival estimate: straight-line distance x 1.4 for road bends, at 30 km/h city speed.
     const moving = ['dispatched', 'en_route'].includes(inc.status) && inc.unit_distance_m != null;
     const km = moving ? Number(inc.unit_distance_m) / 1000 : null;
+    const meters = moving ? Math.round(Number(inc.unit_distance_m)) : null;
     delete inc.unit_distance_m;
     if (!moving) { inc.unit_lat = null; inc.unit_lng = null; }
     res.json({
       ...inc,
+      distance_m: meters,
       distance_km: km == null ? null : Math.round(km * 10) / 10,
       eta_minutes: km == null ? null : Math.max(1, Math.round((km * 1.4 / 30) * 60)),
       claim: await one(`SELECT c.id, c.status, p.name AS insurer FROM claims c JOIN providers p ON p.id=c.provider_id WHERE c.incident_id=$1 ORDER BY c.id DESC LIMIT 1`),
