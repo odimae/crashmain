@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import { pool, tx } from './db.js';
 import { requireAuth } from './auth.js';
 
-const STAFF = ['dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic', 'hospital'];
+const STAFF = ['dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic', 'hospital', 'towing', 'fire', 'other'];
 const ADMIN_ROLES = [...STAFF, 'admin']; // an admin may create other admins
 const num = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
 const plateOf = (v) => String(v ?? '').toUpperCase().replace(/[^A-Z0-9 ]/g, '').trim().slice(0, 12);

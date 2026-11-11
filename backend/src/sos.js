@@ -1,10 +1,12 @@
 import { Router } from 'express'
 import crypto from 'crypto'
 import rateLimit from 'express-rate-limit'
+import bcrypt from 'bcryptjs'
 import { pool } from './db.js'
 import { requireAuth, verify } from './auth.js'
 
-const PROVIDER_ROLES = ['ambulance', 'police', 'insurer', 'lawyer', 'mechanic', 'hospital']
+const TYPES = ['ambulance', 'hospital', 'police', 'insurer', 'lawyer', 'mechanic', 'towing', 'fire', 'other'] // a provider's staff role = its type
+const PROVIDER_ROLES = TYPES
 const ACTIONS = ['accept', 'decline', 'review', 'refer']
 const km = (a, b) => {
   const R = 6371, rad = (x) => (x * Math.PI) / 180
@@ -127,6 +129,15 @@ export function sosRouter() {
     await pool.query(
       `WITH u AS (UPDATE sos_notifications SET viewed_at=now() WHERE provider_id=$1 AND viewed_at IS NULL AND sos_id = ANY($2::int[]) RETURNING sos_id)
        INSERT INTO sos_events (sos_id,provider_id,user_id,type) SELECT sos_id,$1,$3,'viewed' FROM u`, [pid, rows.map((x) => x.id), req.user.sub])
+    // Who else is already responding, so providers can coordinate and decline if help is covered.
+    const { rows: rsp } = rows.length ? await pool.query(
+      `SELECT rs.sos_id, p.id AS pid, p.name, p.type, rs.status,
+              COALESCE(rs.responder_lat, ST_Y(p.location::geometry)) AS lat, COALESCE(rs.responder_lng, ST_X(p.location::geometry)) AS lng
+       FROM sos_responses rs JOIN providers p ON p.id=rs.provider_id WHERE rs.action='accept' AND rs.sos_id = ANY($1::int[])`, [rows.map((x) => x.id)]) : { rows: [] }
+    for (const x of rows) {
+      x.responding = rsp.filter((y) => y.sos_id === x.id && y.pid !== pid).map((y) => ({
+        name: y.name, type: y.type, status: y.status, eta_minutes: etaMin(km({ lat: x.lat, lng: x.lng }, { lat: Number(y.lat), lng: Number(y.lng) })) }))
+    }
     res.json(rows)
   })
 
@@ -195,10 +206,11 @@ export function sosRouter() {
   })
   r.get('/admin/sos/:id', staff, async (req, res) => {
     const id = Number(req.params.id)
-    const [responses, events] = await Promise.all([
-      pool.query('SELECT rs.*, p.name AS provider FROM sos_responses rs JOIN providers p ON p.id=rs.provider_id WHERE rs.sos_id=$1', [id]),
+    const [responses, notified, events] = await Promise.all([
+      pool.query('SELECT rs.*, p.name AS provider, round(extract(epoch FROM rs.created_at - s.created_at)) AS response_s FROM sos_responses rs JOIN providers p ON p.id=rs.provider_id JOIN sos_requests s ON s.id=rs.sos_id WHERE rs.sos_id=$1', [id]),
+      pool.query('SELECT p.name AS provider, n.notified_at, n.viewed_at FROM sos_notifications n JOIN providers p ON p.id=n.provider_id WHERE n.sos_id=$1 ORDER BY p.name', [id]),
       pool.query('SELECT e.*, p.name AS provider FROM sos_events e LEFT JOIN providers p ON p.id=e.provider_id WHERE e.sos_id=$1 ORDER BY e.created_at', [id])])
-    res.json({ responses: responses.rows, events: events.rows })
+    res.json({ responses: responses.rows, notified: notified.rows, events: events.rows })
   })
   r.post('/admin/sos/:id/assign', staff, async (req, res) => {
     const id = Number(req.params.id), pid = Number(req.body?.provider_id)
@@ -214,6 +226,40 @@ export function sosRouter() {
   r.post('/admin/sos/:id/close', staff, async (req, res) => {
     await pool.query("UPDATE sos_requests SET status='closed' WHERE id=$1", [Number(req.params.id)])
     await ev(pool, Number(req.params.id), null, req.user.sub, 'closed', 'Closed by admin')
+    res.json({ ok: true })
+  })
+  r.post('/admin/sos/:id/escalate', staff, async (req, res) => {
+    const id = Number(req.params.id)
+    const { rowCount } = await pool.query('INSERT INTO sos_notifications (sos_id,provider_id) SELECT $1, id FROM providers WHERE active AND verified ON CONFLICT DO NOTHING', [id])
+    await ev(pool, id, null, req.user.sub, 'escalated', `Re-broadcast to all active providers: ${rowCount} newly notified`)
+    res.json({ ok: true, newly_notified: rowCount })
+  })
+
+  // ---- Admin: provider organisations (with their first staff login) and an on/off switch
+  r.get('/admin/providers', staff, async (_req, res) => {
+    const { rows } = await pool.query('SELECT id, name, type, phone, active, verified, ST_Y(location::geometry) AS lat, ST_X(location::geometry) AS lng FROM providers ORDER BY name')
+    res.json(rows)
+  })
+  r.post('/admin/providers', requireAuth('admin'), async (req, res) => {
+    const { name, type, phone, lat, lng, email, password } = req.body || {}
+    if (!name || !TYPES.includes(type)) return res.status(400).json({ error: `Name and a type (${TYPES.join(', ')}) are required` })
+    if (lat == null || lng == null || !(Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) return res.status(400).json({ error: 'A valid location (latitude and longitude) is required' })
+    if (!email || String(password || '').length < 10) return res.status(400).json({ error: 'An email and a password of 10+ characters are required' })
+    const c = await pool.connect()
+    try {
+      await c.query('BEGIN')
+      const { rows: [p] } = await c.query('INSERT INTO providers (name,phone,type,location) VALUES ($1,$2,$3,ST_MakePoint($5,$4)::geography) RETURNING id', [name, phone || null, type, Number(lat), Number(lng)])
+      await c.query('INSERT INTO users (name,email,phone,password_hash,role,provider_id) VALUES ($1,lower($2),$3,$4,$5,$6)', [name, email, phone || null, await bcrypt.hash(String(password), 12), type, p.id])
+      await c.query('COMMIT')
+      res.status(201).json({ id: p.id, email: String(email).toLowerCase() })
+    } catch (e) {
+      await c.query('ROLLBACK')
+      if (e.code === '23505') return res.status(409).json({ error: 'That email already has an account' })
+      throw e
+    } finally { c.release() }
+  })
+  r.patch('/admin/providers/:id', requireAuth('admin'), async (req, res) => {
+    await pool.query('UPDATE providers SET active=$2 WHERE id=$1', [Number(req.params.id), !!req.body?.active])
     res.json({ ok: true })
   })
   return r

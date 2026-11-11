@@ -10,6 +10,7 @@ const Badge = ({ s }) => <span className={`badge s-${s}`}>{String(s).replace('_'
 function useLoad(path, live) {
   const [state, setState] = useState({ data: null, error: '' })
   const load = useCallback(async () => {
+    if (!path) return
     try { setState({ data: await api('GET', path), error: '' }) }
     catch (e) { setState((s) => ({ ...s, error: e.message })) }
   }, [path])
@@ -141,7 +142,7 @@ function Users() {
         <div><label htmlFor="ue">Email</label><input id="ue" type="email" value={f.email} onChange={set('email')} /></div>
         <div><label htmlFor="ur">Role</label>
           <select id="ur" value={f.role} onChange={(e) => setF({ ...f, role: e.target.value, provider_id: '', unit_callsign: '' })}>
-            {['admin', 'dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic', 'hospital'].map((r) => <option key={r}>{r}</option>)}
+            {['admin', 'dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic', 'hospital', 'towing', 'fire', 'other'].map((r) => <option key={r}>{r}</option>)}
           </select></div>
         <div><label htmlFor="up">Password (10+ characters)</label><input id="up" type="password" autoComplete="new-password" value={f.password} onChange={set('password')} /></div>
         <div><label htmlFor="uph">Phone (optional)</label><input id="uph" value={f.phone} onChange={set('phone')} /></div>
@@ -150,6 +151,100 @@ function Users() {
           <select id="uo" value={f.provider_id} onChange={set('provider_id')}><option value="">None</option>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>}
       </div>
       <p><button onClick={create}>Create account</button></p>
+      {msg && <p className={`msg${msg.err ? ' err' : ''}`}>{msg.text}</p>}
+    </>
+  )
+}
+
+const TYPES = ['ambulance', 'hospital', 'police', 'insurer', 'lawyer', 'mechanic', 'towing', 'fire', 'other']
+const makePw = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('')
+const dur = (s) => (s == null ? 'no response' : s < 60 ? `${s}s` : `${Math.round(s / 60)} min`)
+
+function SosDetail({ id, reload }) {
+  const { data: d, reload: again } = useLoad(`/admin/sos/${id}`, true)
+  const { data: provs } = useLoad('/admin/providers', false)
+  const [pid, setPid] = useState('')
+  const run = async (fn) => { try { await fn(); again(); reload() } catch (e) { window.alert(e.message) } }
+  if (!d) return <p className="empty">Loading…</p>
+  return (
+    <>
+      <div className="acts" style={{ margin: '12px 0' }}>
+        <select aria-label="Provider to assign" value={pid} onChange={(e) => setPid(e.target.value)} style={{ width: 'auto' }}>
+          <option value="">Choose a provider…</option>{(provs || []).filter((p) => p.active).map((p) => <option key={p.id} value={p.id}>{p.name} ({p.type})</option>)}
+        </select>
+        <button className="small" disabled={!pid} onClick={() => run(() => api('POST', `/admin/sos/${id}/assign`, { provider_id: Number(pid) }))}>Assign</button>
+        <button className="small" onClick={() => run(() => api('POST', `/admin/sos/${id}/escalate`))}>Escalate (re-broadcast)</button>
+        <button className="small" style={{ background: 'var(--red)' }} onClick={() => window.confirm('Close this SOS?') && run(() => api('POST', `/admin/sos/${id}/close`))}>Close</button>
+      </div>
+      <h3>Provider responses</h3>
+      <Table head={['Provider', 'Response', 'Status', 'Response time', 'Note']} empty="No provider has responded yet.">
+        {d.responses.map((x) => <tr key={x.id}><td>{x.provider}</td><td>{x.action}</td><td>{x.status}</td><td>{dur(Number(x.response_s))}</td><td>{x.reason || ''}</td></tr>)}
+      </Table>
+      <h3>Notified ({d.notified.length})</h3>
+      <p className="empty" style={{ padding: 0 }}>{d.notified.map((n) => `${n.provider}${n.viewed_at ? ' (viewed)' : ''}`).join(', ')}</p>
+      <h3>Audit history</h3>
+      <ul style={{ margin: 0, paddingLeft: 18 }}>{d.events.map((e) => <li key={e.id}>{new Date(e.created_at).toLocaleTimeString()} · {e.type}{e.provider ? ` · ${e.provider}` : ''}{e.note ? ` · ${e.note}` : ''}</li>)}</ul>
+    </>
+  )
+}
+
+function SosMonitor() {
+  const { data, error, reload } = useLoad('/admin/sos', true)
+  const [sel, setSel] = useState(null)
+  if (error && !data) return <p className="msg err">{error}</p>
+  if (!data) return <p className="empty">Loading…</p>
+  return (
+    <>
+      <h2>Broadcast SOS</h2>
+      <Table head={['Reference', 'Status', 'Category', 'Raised', 'Notified', 'Viewed', 'Accepted', 'Declined', 'Waiting', 'First response']} empty="No SOS yet.">
+        {data.map((s) => (
+          <tr key={s.id} onClick={() => setSel(s.id)} style={{ cursor: 'pointer', background: sel === s.id ? 'var(--paper)' : undefined }}>
+            <td><b>{s.ref}</b></td><td><Badge s={s.status === 'open' ? 'new' : s.status === 'accepted' ? 'dispatched' : 'cancelled'} /></td><td>{s.category || ''}</td>
+            <td>{when(s.created_at)}</td><td>{s.notified}</td><td>{s.viewed}</td><td>{s.accepted}</td><td>{s.declined}</td><td>{s.notified - s.accepted - s.declined}</td><td>{dur(s.first_response_s == null ? null : Number(s.first_response_s))}</td>
+          </tr>
+        ))}
+      </Table>
+      {sel && <SosDetail id={sel} reload={reload} key={sel} />}
+    </>
+  )
+}
+
+function ProvidersAdmin() {
+  const { data, error, reload } = useLoad('/admin/providers', false)
+  const blank = () => ({ name: '', type: 'ambulance', phone: '', email: '', password: makePw(), lat: '', lng: '' })
+  const [f, setF] = useState(blank)
+  const [msg, setMsg] = useState(null)
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value })
+  const gps = () => navigator.geolocation ? navigator.geolocation.getCurrentPosition(
+    (p) => setF({ ...f, lat: p.coords.latitude.toFixed(5), lng: p.coords.longitude.toFixed(5) }), () => setMsg({ text: 'Could not read GPS. Type the latitude and longitude.', err: true })) : null
+  const create = async () => {
+    setMsg(null)
+    try {
+      const r = await api('POST', '/admin/providers', { ...f, lat: Number(f.lat), lng: Number(f.lng) })
+      setMsg({ text: `Created. Sign-in: ${r.email} / ${f.password} (copy this now, it is not shown again)` }); setF(blank()); reload()
+    } catch (e) { setMsg({ text: e.message, err: true }) }
+  }
+  const toggle = async (p) => { try { await api('PATCH', `/admin/providers/${p.id}`, { active: !p.active }); reload() } catch (e) { window.alert(e.message) } }
+  return (
+    <>
+      <h2>Provider organisations</h2>
+      {error && !data ? <p className="msg err">{error}</p> : null}
+      {data && <Table head={['Name', 'Type', 'Phone', 'Location', 'Status', '']} empty="No providers.">
+        {data.map((p) => <tr key={p.id}><td>{p.name}</td><td>{p.type}</td><td>{p.phone || ''}</td><td>{pos(p.lat, p.lng)}</td>
+          <td>{p.active ? 'Active' : 'Off'}</td><td><button className="small ghost" onClick={() => toggle(p)}>{p.active ? 'Turn off' : 'Turn on'}</button></td></tr>)}
+      </Table>}
+      <h2 style={{ marginTop: 24 }}>Add an organisation</h2>
+      <p className="empty" style={{ padding: 0 }}>It joins every future SOS broadcast. Its sign-in account is created with it.</p>
+      <div className="row">
+        <div><label htmlFor="pn">Organisation name</label><input id="pn" value={f.name} onChange={set('name')} /></div>
+        <div><label htmlFor="pt">Type</label><select id="pt" value={f.type} onChange={set('type')}>{TYPES.map((t) => <option key={t}>{t}</option>)}</select></div>
+        <div><label htmlFor="pe">Sign-in email</label><input id="pe" type="email" value={f.email} onChange={set('email')} /></div>
+        <div><label htmlFor="pp">Password (10+ characters)</label><input id="pp" value={f.password} onChange={set('password')} /></div>
+        <div><label htmlFor="pph">Phone</label><input id="pph" value={f.phone} onChange={set('phone')} /></div>
+        <div><label htmlFor="pla">Latitude</label><input id="pla" value={f.lat} onChange={set('lat')} /></div>
+        <div><label htmlFor="pln">Longitude</label><input id="pln" value={f.lng} onChange={set('lng')} /></div>
+      </div>
+      <p className="acts"><button className="small ghost" style={{ color: 'var(--ink)', borderColor: 'var(--line)' }} onClick={gps}>Capture GPS here</button><button onClick={create}>Create organisation</button></p>
       {msg && <p className={`msg${msg.err ? ' err' : ''}`}>{msg.text}</p>}
     </>
   )
@@ -183,7 +278,7 @@ function Login({ onDone }) {
 
 export default function App() {
   const [authed, setAuthed] = useState(!!session.token)
-  const [tab, setTab] = useState('incidents')
+  const [tab, setTab] = useState('sos')
   const [live, setLive] = useState(true)
   const [health, setHealth] = useState(null)
 
@@ -196,7 +291,7 @@ export default function App() {
 
   const signOut = async () => { try { await api('POST', '/auth/logout') } catch {} session.clear(); setAuthed(false) }
   const label = { ok: 'API and database connected', db: 'API up, database not reachable', down: 'API not reachable' }[health] || 'checking API'
-  const tabs = { incidents: 'Incidents', units: 'Ambulances', providers: 'Providers', users: 'Users' }
+  const tabs = { sos: 'Broadcast SOS', providers: 'Providers', users: 'Users', incidents: 'Old incidents', units: 'Ambulances' }
 
   return (
     <>
@@ -216,7 +311,8 @@ export default function App() {
             <div className="card">
               {tab === 'incidents' && <Incidents live={live} />}
               {tab === 'units' && <Units live={live} />}
-              {tab === 'providers' && <Providers />}
+              {tab === 'providers' && <ProvidersAdmin />}
+              {tab === 'sos' && <SosMonitor />}
               {tab === 'users' && <Users />}
             </div>
           </>
