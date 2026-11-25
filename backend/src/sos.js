@@ -20,7 +20,7 @@ const ev = (c, sos, provider, user, type, note) =>
 
 async function access(req, id) {
   const { rows: [s] } = await pool.query(
-    `SELECT id, ref, status, category, description, client_id, tracking_token, created_at,
+    `SELECT id, ref, kind, status, category, description, client_id, tracking_token, created_at,
             ST_Y(location::geometry) AS lat, ST_X(location::geometry) AS lng FROM sos_requests WHERE id=$1`, [id])
   if (!s) return null
   let ok = !!req.query.token && req.query.token === s.tracking_token
@@ -84,6 +84,47 @@ export function sosRouter() {
     res.json(s || null)
   })
 
+  // Everything this client has open: emergencies and service requests (an SOS is never blocked by a request).
+  r.get('/sos/active', requireAuth('victim'), async (req, res) => {
+    const { rows } = await pool.query("SELECT id, ref, kind FROM sos_requests WHERE client_id=$1 AND status<>'closed' AND created_at > now()-interval '24 hours' ORDER BY (kind='sos') DESC, created_at DESC", [req.user.sub])
+    res.json(rows)
+  })
+
+  // ---- Client: non-emergency service request, sent only to the chosen provider (or every active provider of the chosen type)
+  r.get('/requests/providers', requireAuth('victim'), async (req, res) => {
+    const type = String(req.query.type || ''), lat = Number(req.query.lat), lng = Number(req.query.lng)
+    if (!TYPES.includes(type) || !(Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) return res.status(400).json({ error: 'Valid type, lat and lng required' })
+    const { rows } = await pool.query(
+      'SELECT id, name, type, ST_Distance(location, ST_MakePoint($3,$2)::geography) AS distance_m FROM providers WHERE active AND verified AND type=$1 ORDER BY distance_m LIMIT 50', [type, lat, lng])
+    res.json(rows)
+  })
+  const requestLimit = rateLimit({ windowMs: 10 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many requests. Try again in a few minutes.' } })
+  r.post('/requests', requireAuth('victim'), requestLimit, async (req, res) => {
+    const { type, provider_id, lat, lng, description } = req.body || {}
+    if (!TYPES.includes(type)) return res.status(400).json({ error: `Type must be one of: ${TYPES.join(', ')}` })
+    if (lat == null || lng == null || !(Math.abs(lat) <= 90 && Math.abs(lng) <= 180)) return res.status(400).json({ error: 'Your location is required' })
+    const { rows: targets } = provider_id
+      ? await pool.query('SELECT id FROM providers WHERE id=$1 AND active AND verified AND type=$2', [Number(provider_id), type])
+      : await pool.query('SELECT id FROM providers WHERE active AND verified AND type=$1', [type])
+    if (!targets.length) return res.status(400).json({ error: `No active ${type} provider is available yet` })
+    const { rows: [u] } = await pool.query('SELECT name, phone FROM users WHERE id=$1', [req.user.sub])
+    const token = crypto.randomBytes(16).toString('hex')
+    const ref = 'REQ-' + new Date().toISOString().slice(0, 10).replace(/-/g, '') + '-' + crypto.randomBytes(3).toString('hex').toUpperCase()
+    const c = await pool.connect()
+    try {
+      await c.query('BEGIN')
+      const { rows: [q] } = await c.query(
+        `INSERT INTO sos_requests (ref,client_id,guest_name,guest_phone,tracking_token,category,description,location,kind,requested_type)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,ST_MakePoint($9,$8)::geography,'request',$6) RETURNING id, ref`,
+        [ref, Number(req.user.sub), u?.name || null, u?.phone || null, token, type, String(description || '').slice(0, 500) || null, Number(lat), Number(lng)])
+      await c.query('INSERT INTO sos_notifications (sos_id, provider_id) SELECT $1, unnest($2::int[])', [q.id, targets.map((x) => x.id)])
+      await ev(c, q.id, null, req.user.sub, 'created', `Service request for ${type}`)
+      await ev(c, q.id, null, null, 'broadcast', `Sent to ${targets.length} ${type} provider(s)`)
+      await c.query('COMMIT')
+      res.status(201).json({ id: q.id, ref: q.ref, notified: targets.length })
+    } catch (e) { await c.query('ROLLBACK'); throw e } finally { c.release() }
+  })
+
   // ---- Client / guest: progress, who was notified, who accepted, with live positions
   r.get('/sos/:id/track', async (req, res) => {
     const s = await access(req, Number(req.params.id))
@@ -118,14 +159,14 @@ export function sosRouter() {
   r.get('/provider/sos', provider, async (req, res) => {
     const pid = await myProvider(req, res); if (!pid) return
     const { rows } = await pool.query(
-      `SELECT s.id, s.ref, s.category, s.description, s.status, s.created_at,
+      `SELECT s.id, s.ref, s.kind, s.category, s.description, s.status, s.created_at,
               ST_Y(s.location::geometry) AS lat, ST_X(s.location::geometry) AS lng, ST_Distance(s.location, p.location) AS distance_m,
               n.viewed_at, rs.action, rs.status AS my_status, rs.reason,
               CASE WHEN rs.action='accept' THEN s.guest_phone END AS phone, CASE WHEN rs.action='accept' THEN s.guest_name END AS client_name,
               (SELECT count(*)::int FROM sos_responses x WHERE x.sos_id=s.id AND x.action='accept') AS accepted_by
        FROM sos_notifications n JOIN sos_requests s ON s.id=n.sos_id JOIN providers p ON p.id=n.provider_id
        LEFT JOIN sos_responses rs ON rs.sos_id=s.id AND rs.provider_id=n.provider_id
-       WHERE n.provider_id=$1 AND s.created_at > now()-interval '24 hours' ORDER BY s.created_at DESC LIMIT 50`, [pid])
+       WHERE n.provider_id=$1 AND s.created_at > now()-interval '24 hours' ORDER BY (s.kind = 'sos') DESC, s.created_at DESC LIMIT 50`, [pid])
     await pool.query(
       `WITH u AS (UPDATE sos_notifications SET viewed_at=now() WHERE provider_id=$1 AND viewed_at IS NULL AND sos_id = ANY($2::int[]) RETURNING sos_id)
        INSERT INTO sos_events (sos_id,provider_id,user_id,type) SELECT sos_id,$1,$3,'viewed' FROM u`, [pid, rows.map((x) => x.id), req.user.sub])
