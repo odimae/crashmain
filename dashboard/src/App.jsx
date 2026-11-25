@@ -125,7 +125,7 @@ function Users() {
   }
   return (
     <>
-      <h2>Staff accounts</h2>
+      <h2>Team members</h2>
       {error && !data ? <p className="msg err">{error}</p> : null}
       {data && (
         <Table head={['Name', 'Email', 'Role', 'Ambulance / organisation', 'Actions']} empty="No staff accounts.">
@@ -136,7 +136,7 @@ function Users() {
           ))}
         </Table>
       )}
-      <h2 style={{ marginTop: 24 }}>Create an account</h2>
+      <h2 style={{ marginTop: 24 }}>Add a team member</h2>
       <div className="row">
         <div><label htmlFor="un">Full name</label><input id="un" value={f.name} onChange={set('name')} /></div>
         <div><label htmlFor="ue">Email</label><input id="ue" type="email" value={f.email} onChange={set('email')} /></div>
@@ -144,13 +144,13 @@ function Users() {
           <select id="ur" value={f.role} onChange={(e) => setF({ ...f, role: e.target.value, provider_id: '', unit_callsign: '' })}>
             {['admin', 'dispatcher', 'ambulance', 'police', 'insurer', 'lawyer', 'mechanic', 'hospital', 'towing', 'fire', 'other'].map((r) => <option key={r}>{r}</option>)}
           </select></div>
-        <div><label htmlFor="up">Password (10+ characters)</label><input id="up" type="password" autoComplete="new-password" value={f.password} onChange={set('password')} /></div>
+        <div><label htmlFor="up">Password (10+ characters)</label><PasswordField id="up" autoComplete="new-password" value={f.password} onChange={set('password')} /></div>
         <div><label htmlFor="uph">Phone (optional)</label><input id="uph" value={f.phone} onChange={set('phone')} /></div>
         {f.role === 'ambulance' && <div><label htmlFor="uc">Ambulance callsign (e.g. AAR-01)</label><input id="uc" value={f.unit_callsign} onChange={set('unit_callsign')} /></div>}
         {orgs.length > 0 && <div><label htmlFor="uo">Organisation</label>
           <select id="uo" value={f.provider_id} onChange={set('provider_id')}><option value="">None</option>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select></div>}
       </div>
-      <p><button onClick={create}>Create account</button></p>
+      <p><button onClick={create}>Add team member</button></p>
       {msg && <p className={`msg${msg.err ? ' err' : ''}`}>{msg.text}</p>}
     </>
   )
@@ -250,6 +250,19 @@ function ProvidersAdmin() {
   )
 }
 
+function PasswordField({ id, value, onChange, autoComplete }) {
+  const [show, setShow] = useState(false)
+  return (
+    <div style={{ position: 'relative' }}>
+      <input id={id} type={show ? 'text' : 'password'} autoComplete={autoComplete} value={value} onChange={onChange} style={{ paddingRight: 64 }} />
+      <button type="button" onClick={() => setShow(!show)} aria-label={show ? 'Hide password' : 'Show password'}
+        style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', background: 'transparent', color: 'var(--blue)', border: 0, padding: '4px 8px', fontWeight: 600 }}>
+        {show ? 'Hide' : 'Show'}
+      </button>
+    </div>
+  )
+}
+
 function Login({ onDone }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -269,7 +282,7 @@ function Login({ onDone }) {
       <label htmlFor="email">Email</label>
       <input id="email" type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} />
       <label htmlFor="pw">Password</label>
-      <input id="pw" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+      <PasswordField id="pw" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
       <p><button type="submit">Sign in</button></p>
       {error && <p className="msg err">{error}</p>}
     </form>
@@ -291,7 +304,7 @@ export default function App() {
 
   const signOut = async () => { try { await api('POST', '/auth/logout') } catch {} session.clear(); setAuthed(false) }
   const label = { ok: 'API and database connected', db: 'API up, database not reachable', down: 'API not reachable' }[health] || 'checking API'
-  const tabs = { sos: 'Broadcast SOS', providers: 'Providers', users: 'Users', incidents: 'Old incidents', units: 'Ambulances' }
+  const tabs = { sos: 'Broadcast SOS', providers: 'Providers', users: 'Team', incidents: 'Old incidents', units: 'Ambulances' }
 
   return (
     <>
